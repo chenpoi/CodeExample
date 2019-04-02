@@ -6,7 +6,7 @@ output: html_notebook
 Part one
 Calculate PWM scores
 ```{r}
-#读取蛋白对应dna结合位点的ChIP-seq频数表
+#read ChIP-Seq tables
 dirpath <- "PATH/TO/DATA" # need to specify before execute this script
 sequence <- list()
 filepath <- paste(dirpath, "/data/", sep = '')
@@ -20,11 +20,9 @@ for (i in foldernames) {
     sequence[[j]] = data.frame(t(sapply(c(1:4), function(x) base[[x]][base[[x]] != ''])), row.names = c('a', 'c', 'g', 't'))
   }
 }
-#把sequence中的名字改成标准基因名
-
 names(sequence) <- sapply(1:length(sequence), function(x) unlist(strsplit(names(sequence)[x],'.jaspar')))
 
-#得到脊椎动物的annotation matrix
+#get annotation matrix
 
 annotationpath <- paste(dirpath, "/annotation/", sep = '')
 annotation <- read.csv(paste(annotationpath, 'JASPAR-Browse Collection core.csv',sep = ''),header = TRUE)
@@ -34,7 +32,7 @@ annotation <- rbind(annotation,read.csv(paste(annotationpath, 'JASPAR-Browse Col
 jasparpath <- paste(dirpath, "/jaspar.txt", sep = '')
 annotation['jaspar'] <- readLines(jasparpath)
 
-#构建pwm
+#build pwm
 #function for working out the position weight matrix value
 
 pwm <- function(freq, bg=0.25){
@@ -58,7 +56,6 @@ signifiseq <- lapply(1:length(pwmsequence),function(x) (apply(pwmsequence[[x]], 
 names(worstseq) <- names(pwmsequence)
 names(signifiseq) <- names(pwmsequence)
 
-#threshold来自于调参过程
 
 threshold <- c(NA,NA,NA,NA,0.908,0.855,0.898,0.801,0.845,0.827,0.849,0.781,0.744,0.765,0.759,0.766,0.776,0.740,0.716,0.801,0.723,0.720)
 thres_path <- '/Users/mengqichen/maybe_useful/zheda/threshold.txt'
@@ -68,7 +65,6 @@ P_thres <- data.frame(matrix(unlist(P_thres),ncol = 2,byrow = T))
 rownames(P_thres) <- P_thres$X1
 annotation['Threshold'] <- P_thres[as.character(annotation$ID),2]
 
-#检验一个序列的pwm分数
 
 seqcheck <- function (seq,pwmatrix,printornot = TRUE)
 {
@@ -90,7 +86,8 @@ seqcheck <- function (seq,pwmatrix,printornot = TRUE)
   }
   return(seq_score)
 }
-#整合部分识别功能
+
+#main function
 seqsearch <- function(seq)
 {
   seq <- gsub('[^a-z]','',seq)
