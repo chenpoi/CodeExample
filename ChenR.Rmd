@@ -1,0 +1,361 @@
+---
+title: "R Example"
+output: html_notebook
+---
+
+Part one
+Calculate PWM scores
+```{r}
+#读取蛋白对应dna结合位点的ChIP-seq频数表
+dirpath <- "PATH/TO/DATA" # need to specify before execute this script
+sequence <- list()
+filepath <- paste(dirpath, "/data/", sep = '')
+foldernames <- list.files(path = filepath)
+for (i in foldernames) {
+  filenames <- list.files(path = paste(filepath,i,sep = ''))
+  for (j in filenames){
+    data = readLines(paste(filepath,i,'/',j,sep = ''))
+    base = strsplit(data[2:5],' ')
+    base = lapply(c(1:4), function(x) gsub("[^0-9.]", "", base[[x]]) )
+    sequence[[j]] = data.frame(t(sapply(c(1:4), function(x) base[[x]][base[[x]] != ''])), row.names = c('a', 'c', 'g', 't'))
+  }
+}
+#把sequence中的名字改成标准基因名
+
+names(sequence) <- sapply(1:length(sequence), function(x) unlist(strsplit(names(sequence)[x],'.jaspar')))
+
+#得到脊椎动物的annotation matrix
+
+annotationpath <- paste(dirpath, "/annotation/", sep = '')
+annotation <- read.csv(paste(annotationpath, 'JASPAR-Browse Collection core.csv',sep = ''),header = TRUE)
+vertebratesID <- sapply(1:length(sequence), function(x) substring(names(sequence)[x],1,8))
+annotation <- annotation[annotation$ID %in% vertebratesID,]
+annotation <- rbind(annotation,read.csv(paste(annotationpath, 'JASPAR-Browse Collection pbm.csv',sep = ''),header = TRUE),read.csv(paste(annotationpath, 'JASPAR-Browse Collection pbm_hlh.csv',sep = ''),header = TRUE),read.csv(paste(annotationpath, 'JASPAR-Browse Collection pbm_homeo.csv',sep = ''),header = TRUE))
+jasparpath <- paste(dirpath, "/jaspar.txt", sep = '')
+annotation['jaspar'] <- readLines(jasparpath)
+
+#构建pwm
+#function for working out the position weight matrix value
+
+pwm <- function(freq, bg=0.25){
+  #using the formulae above
+  total <- colSums(freq)
+  p <- (freq + (sqrt(total) * 1/4)) / (total + (4 * (sqrt(total) * 1/4)))
+  returnValue(data.frame(log2(p/bg),row.names = c('a','c','g','t')))
+}
+pwmsequence <- lapply(1:length(sequence), function(y) {sapply(sequence[[y]], function(x) as.numeric(as.character(x)))})  #pwmsequence用于存储所有序列的pwm矩阵
+names(pwmsequence) <- names(sequence)
+pwmsequence <- lapply(pwmsequence,function(x) signif(pwm(x),3))  #pwmsequence用于存储PWM矩阵，3位有效数字
+pwmcolmax <- sapply(1:length(pwmsequence),function(x) apply(pwmsequence[[x]],2,max)) #pwmcolmax用于储存pwm矩阵每列的最大值
+names(pwmcolmax) <- names(pwmsequence)
+pwmsum <- sapply(1:length(pwmsequence),function(x) sum(apply(pwmsequence[[x]],2,max)))#pwmsum用于储存pwm矩阵每列的和
+names(pwmsum) <- names(pwmsequence)
+bestseq <- lapply(1:length(pwmsequence),function(x) gsub("[^[:alpha:]]", "",row.names(pwmsequence[[x]][apply(pwmsequence[[x]], 2, which.max),])))
+names(bestseq) <- names(pwmsequence)
+pwmlength <- sapply(1:23, function(y) which(sapply(1:length(pwmsequence), function(x) ncol(pwmsequence[[x]]))==y))
+worstseq <- lapply(1:length(pwmsequence),function(x) gsub("[^[:alpha:]]", "",row.names(pwmsequence[[x]][apply(pwmsequence[[x]], 2, which.min),])))
+signifiseq <- lapply(1:length(pwmsequence),function(x) (apply(pwmsequence[[x]], 2, max) - apply(pwmsequence[[x]], 2, min)) / pwmsum[[x]] > 0.15)
+names(worstseq) <- names(pwmsequence)
+names(signifiseq) <- names(pwmsequence)
+
+#threshold来自于调参过程
+
+threshold <- c(NA,NA,NA,NA,0.908,0.855,0.898,0.801,0.845,0.827,0.849,0.781,0.744,0.765,0.759,0.766,0.776,0.740,0.716,0.801,0.723,0.720)
+thres_path <- '/Users/mengqichen/maybe_useful/zheda/threshold.txt'
+P_thres <- readLines(thres_path)
+P_thres <- strsplit(P_thres[-1],'\t')
+P_thres <- data.frame(matrix(unlist(P_thres),ncol = 2,byrow = T))
+rownames(P_thres) <- P_thres$X1
+annotation['Threshold'] <- P_thres[as.character(annotation$ID),2]
+
+#检验一个序列的pwm分数
+
+seqcheck <- function (seq,pwmatrix,printornot = TRUE)
+{
+  x <- unlist(strsplit(seq,split=''))
+  if (length(x) != ncol(pwmatrix)) {
+    print('the length of seq is not allowed')
+    return()
+  }
+  #initialise vector
+  seq_score <- vector()
+  #get the corresponding values
+  seq_score <- sapply(1:length(x),function(y) pwmatrix[x[y],y])
+  names(seq_score) <- x
+  if (printornot) {
+    print(seq_score)
+    #slightly different score to the paper due to their rounding
+    #max score
+    cat(sprintf("sum of seq score = %s \nmax score = %f\n", sum(seq_score), sum(apply(pwmatrix,2,max))))
+  }
+  return(seq_score)
+}
+#整合部分识别功能
+seqsearch <- function(seq)
+{
+  seq <- gsub('[^a-z]','',seq)
+  seq <- gsub('u','t',seq)  #两步预处理
+  starttime <- Sys.time()
+  outputvalue <- list()  #保存结果
+  x <- unlist(strsplit(seq,split=''))  #讲string转化为character的集合
+  for (i in 5:min((length(x)-1),22)){ #最短的识别序列是6 bases.最长的识别序列是23 bases
+    for (j in 1:(length(x)-i)){
+      y <- x[j:(j+i)]
+      scorelist <- list()   #scorelevel用于存储相关motif的pwm计算结果
+      len <- length(y)
+      for (k in pwmlength[[len]]) {
+        check1 <- sum(y==bestseq[[k]])/len  #check1意为sequence中有多少位是和bestseq一致的
+        if (check1 <= 0.5) {
+          next
+        }
+        check2 <- sum((y == worstseq[[k]])[signifiseq[[k]]]) #check2意为sequence中有多少位是和worstseq一致的
+        if (check2 >= 2) {
+          next
+        }
+        scorelist[[names(pwmsequence[k])]] <- sapply(1:len, function(l) pwmsequence[[k]][y[l],l]) #如果超过阈值2了，那么就可以进一步计算他的PWM分数
+        names(scorelist[[names(pwmsequence[k])]]) <- y
+      }
+      scorelevel <- numeric()
+      scorelevel <- sapply(names(scorelist),function(z) sum(scorelist[[z]])/pwmsum[z])
+      passcore <- scorelevel[scorelevel > threshold[i]]   #阈值1为threshold
+      if (length(passcore) > 0){
+        names(passcore) <- substr(names(passcore),1,8)
+        outputvalue <- c(outputvalue, lapply(names(passcore), function(x) c(names(passcore[x]), as.character(annotation[annotation$ID == names(passcore[x]),'Name']), annotation[annotation$ID == names(passcore[x]),'jaspar'], signif(as.numeric(passcore[x]),3), paste(y, collapse = ""), as.character(annotation[annotation$ID == names(passcore[x]),'Threshold']),j, j+i, ';')))
+      }
+    }
+  }
+  print(Sys.time()-starttime)
+  if (length(outputvalue) == 0){
+    return('No TFs Meeting Requirement!')
+  } else {
+    return(paste(unlist(outputvalue),collapse = ','))
+  }
+}
+seqsearch("atattgctttgagtgggggcttctaccctcagttaactgcaggcttctaactctctgaaacgtgcacattttagtgtggatgagcttctttgcatctttctgggagaagttctacagctttcttagatttccctgtgacccataaaaggcttttaaaaaaaaaagaccaattattagcctactgaaagccaatggaacattaggcacgtcaatattttattataaaaaaatctataaatgctatggaggcattaaaatatttagaacaaccctgtggtgacacagaaaatgttgatgtgataatgccaataacaatttgaaagtgttatgttcactttctcaactctgattacctcctcaatccatgcatatttcacttcctttcttccaactagactgtacttagcaaggtcaccagtgaccttcaccttgtcagatccagcaaccacttctctatcctcgaatttgcagtatagttggccaccagctctgcttccatgccataactagtctgtttctaccttactggctctctttcccagtcgcaaatgcctcacacttgaggtatttaggtgtatttaagtcacgtctgcagcccagactgctacagtgagctctgtacaacaatatatccaattgtctacttaacatcactccttgactaaaatgtaagcatctcagaccaagtatttccagtctgggcatggtggctcacccctgtaatcccagcactttgggaggccaagccaagaggactgcttgagtccagaagtttgataccagcctgggcaatatagcaagatcccatctctacaaataataataataataataataataataataataataataaaagagctgggtgtggtggtgcatgcctgtagccctagctacttgggaggctgaggtgggaggctcactttagcccaggaattgaaggctgtgaatattttcaaataattaattaatactattattgcctttctcgtttggctcccagaacagtacctggtccacagaggactctcaagaaatagttgctgaatgaatgaatgaatgtaaaatggggtaaataattatatttttaaattattttttaaaattgtacatatatgtatatataactgtacaatttaacaacatgctatgtgtagacattaaagtgatgggaaaaacaccaaacattaacagcggttgtgcatgaaattaaaagatttttcttaaaactccttctctatttttcaattttatttacagcgtagtggttaagaataccaaaatttagagtctgagtgaagactgccagttaccagctgcacaaccttggtttcctcttgtgtcaaattggcttaaaaatatacacagtaccggccaggcgcggtggctcacacctgtaatcccagcactttggaaaaccgaggcgggcggattgcctgagctcaggagttcgcgaccagcctgggcaacaaggtgaaaccccgtctctactaaaatacaaaagaattagccgggcgtggcggcgggtgcctgtagtcccagctactttggacgctgaggcaggagaactgcttgaacccgggaggcggagattgtagtgagccgagatcgcgccactgccctccagcctgggagacagagtgagactccgtctcaaaaaaaaaaaaaaaaaagtatatatctatatatagatatatagatagacgcagtacctcctttgtattaacatccctaataagctttactgtgaaattatggatgaaaggatctttgcacgatgcaggtacgtagtgagggacagtaatgttagttgataacgattacaggtatgttttattttataatgaaaatacatttgtcttctaaacctttaccgaagggagtgaaaagaacacctcacccaaacgcccgcccttatgtgcgcagccccgcctcctgtaggccccaccccaccaaagggtgcgcctgcgccgttcttttttccgtccacgtgacccactc")
+```
+
+Part two
+Simulate the distribution of the numbers of repeats in a certain length of DNA sequence randomly.
+```{r}
+#need to install parallel and sets package ahead of time.
+library(parallel)
+library(sets)
+
+#PART1: Functions Defined
+#--------------------------------------------------------------------------------------------------------------------------------------------------------
+#create random number with only c(1,2,3,4)
+convert <- function(num, n = 19) {
+  digit <- array()
+  for (i in n:0) {
+    digit[i+1] <- num %/% (4^i) + 1
+    num <- num - (digit[i+1] - 1) * 4^i
+  }
+  return(digit)
+}
+
+#cut a large number into smaller pieces to avoid unwanted Inf value.
+preconvert <- function(pow) {
+  n <- (pow %/% 20) * 2
+  m <- pow %% 20
+  number <- runif(n,max = 4^20)
+  whole_digit <- list()
+  for (i in 1:n) {
+    whole_digit[[i]] <-  convert(number[i])[-(1:10)]
+  }
+  return(unlist(whole_digit)[-(1:(20-m))])
+}
+
+#Three digit score of the original sequence
+pre3 <- function(seq_val) {
+  y1 <- unlist(sapply(1:(length(seq_val)-1), function(x) seq_val[x+1]))
+  y11 <- unlist(sapply(1:(length(seq_val)-2), function(x) seq_val[x+2]))
+  return((seq_val[-length(seq_val)] * y1)[-(length(seq_val)-1)] * y11)
+}
+
+#these functions will be executed in multithread function
+#the first one is general model
+parallel_part <- function(i) {
+  read <- y[i:(i+len-1)]
+  score <- y2[i:(i+len-3)]
+  res <- kmer[[score[1]]]
+  for (j in 2:loop_num) {
+    res <- res[(res + j*3-3) %in% kmer[[score[j*3-2]]]]
+    if (length(res) == 1) {
+      break
+    }
+  }
+  res <- res[res != i]
+  k <- length(res)
+  while (k) {
+    if (identical(read,y[res[k]:(res[k]+len-1)])) {
+      total <- c(total,res[k])
+    }
+    k <- k-1
+  }
+  return(total)
+}
+
+#the second is box model
+parallel_box_part <- function(i) {
+  for (o in 0:9) {
+    read <- y[(i*10+o):(i*10+o+len-1)]
+    score <- y2[(i*10+o):(i*10+o+len-3)]
+    res <- kmer[[score[1]]]
+    for (j in 2:loop_num) {
+      res <- res[(res + j*3-3) %in% kmer[[score[j*3-2]]]]
+      if (length(res) == 1) {
+        break
+      }
+    }
+    res <- res[res != (i*10+o)]
+    k <- length(res)
+    while (k) {
+      if (identical(read,y[res[k]:(res[k]+len-1)])) {
+        total <- c(total,res[k])
+      }
+      k <- k-1
+    }
+  }
+  return(total)
+}
+
+
+#result analysis and output
+res_analysis <- function(res) {
+  bar <- list()
+  j <- 1
+  for (i in 1:length(res)) {
+    if (length(res[[i]] > 0)) {
+      bar[[j]]<- as.set(as.numeric(c(i,unlist(res[[i]]))))
+      j <- j + 1
+    }
+  }
+  bar <- bar[!duplicated(bar)]
+  pair_number <- sapply(2:6, function(x) sum(lengths(bar) == x))
+  
+  
+  print('the reads with a length of 10 started with following position have repeats (only first five detected sites)')
+  
+  print(head(sort(unique(unlist(res)))))
+  
+  cat(sprintf('we take %s secs. to finish all commands \n# of repeat: %s\n',round(Sys.time() - starttime), length(unique(unlist(res)))))
+  
+  cat(sprintf('# of different repeats %s\n# of repeats with 2 copies %s, # of repeats with 3 copies %s, # of repeats with 4 copies %s, # of repeats with 5 copies %s, # of repeats with 6 copies %s', length(bar),pair_number[1],pair_number[2],pair_number[3],pair_number[4],pair_number[5],pair_number[6]))
+  
+}
+
+
+
+
+#use the simplest way to check the repeat result
+check_repeat <- function(seq, position,len = 10) {
+  read <- seq[position:(position+len-1)]
+  res <- list()
+  for (i in 1:(length(seq) - len)) {
+    if (identical(read,seq[i:(i+len-1)])) {
+      res <- c(res,i)
+    }
+  }
+  return(unlist(res)[unlist(res) != position])
+}
+
+#PART2: Main Function
+#--------------------------------------------------------------------------------------------------------------------------------------------------------
+
+#initialize parament
+len = 10
+SeqLen = 150000
+box <- FALSE
+
+#start to precess the sequence
+starttime <- Sys.time()
+y <- preconvert(SeqLen)
+y[y == 4] <- 5 #we need prime numbers only, to get distinct multiply result if they come from different pairs of multiplier.
+y2 <- pre3(y)
+
+#we need to cluster the score of whole sequence into different groups firstly. so when we meet with reads with same score, we can simply subset and put it in a group
+l <- c(1,2,3,5)
+kmer <- list()
+for (i in l) {
+  for (j in l) {
+    for (k in l) {
+      kmer[[i*j*k]] <- which(y2 == i*j*k)
+    }
+  }
+}
+
+#begin to execute parallel function
+total <- list()
+loop_num <- len %/% 3
+
+#parallel package
+no_cores <- detectCores() - 1
+cl<-makeCluster(no_cores)
+
+#load all neceaasry variable into parallel environment
+clusterExport(cl, c("total","loop_num","y","kmer","parallel_part","len","pre3","parallel_box_part","y2"))
+
+#the main function
+if (!box) {
+  result <- parLapply(cl, 1:(SeqLen-len+1), function(x) parallel_part(x))
+} else {
+  result <- parLapply(cl, 1:((SeqLen-len+1)%/%len), function(x) parallel_box_part(x))
+  if ((SeqLen-len+1) %% len) {
+    for (o in 1:((SeqLen-len+1) %% len)) {
+      result <- c(result, parallel_part(length(SeqLen)-o-len))
+    }
+  }
+}
+
+res_analysis(result)
+```
+
+Part three
+Regression model and feature selection
+One assignment in my courses.
+```{r}
+dirpath <- "PATH/TO/DATA" # need to specify before execute this script
+df <- read.table(paste(dirpath, "/student-mat.csv", sep = ""), header = TRUE, sep = ";")
+library(psych)
+pairs.panels(df[,c("age", "absences", "G1", "G2", "G3")])
+# from pairs.panels plot, I find that there are strong corelationship between G1 G2 and G3.
+library(mlbench)
+library(caret)
+str(df)
+# step 1: manually choose candidate varialbles for regression
+df_candidate <- df[,c("studytime","failures" ,"schoolsup","famsup","higher","Dalc", "Walc","absences","G1", "G2", "G3")]
+schoolsup_dummy <- dummy.code(df_candidate$schoolsup)
+colnames(schoolsup_dummy) <- c("schoolsup_no", "schoolsup_yes")
+famsup_dummy <- dummy.code(df_candidate$famsup)
+colnames(famsup_dummy) <- c("famsup_no", "famsup_yes")
+higher_dummy <- dummy.code(df_candidate$higher)
+colnames(higher_dummy) <- c("higher_no", "higher_yes")
+df_candidate_after_dummy <- cbind(df_candidate[,c("studytime","failures","Dalc", "Walc","absences","G1", "G2")], schoolsup_dummy, famsup_dummy, higher_dummy)
+# step 2: remove redundant features
+correlationMatrix <- cor(df_candidate_after_dummy)
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.5)
+df_candidate_after_dummy_remove_corelated <- df_candidate_after_dummy[,-highlyCorrelated]
+df_model <- cbind(df_candidate$G3, df_candidate_after_dummy_remove_corelated)
+colnames(df_model)[1] <- "G3"
+# repeated cross validation is applied
+# so no need to create a specific train or validation set
+control <- trainControl(method="repeatedcv", number=10, repeats=3)
+model <- train(G3~.,data = df_model,  method="lm", preProcess="scale", trControl=control)
+model
+# step 3: rank features by importance
+importance <- varImp(model, scale=FALSE)
+plot(importance)
+# step 4: feature selection
+featureSelection <- step(lm(G3~.,data = df_model), direction = "backward" )
+df_final <- df_model[,c(names(featureSelection$coefficients)[-1], "G3")]
+featureSelection$coefficients
+# the formula is G3 = -1.31333583 + 1.08389653*G2+0.03754005*absences--0.29496407*failures
+# the backward elimination measure I use is AIC
+df_test <- data.frame(failures = 3, absences = 11, G2 = 20)
+predict(featureSelection,df_test, interval="confidence")
+# 95% confidene interval is [18.84598, 20.9393]
+model <- lm(G3~., data = df_final)
+(rmse <- sqrt(mean(model$residuals^2)))
+
+```
+
