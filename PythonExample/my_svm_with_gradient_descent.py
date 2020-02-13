@@ -3,6 +3,8 @@ from sklearn.datasets import load_breast_cancer
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
+from sklearn import svm
+
 
 def linear(X1, X2, c=0):
     return X1.dot(X2.T) + c
@@ -96,4 +98,14 @@ Xtest = scaler.transform(Xtest)
 model = mySvm(kernel=kernel, C=1.0)
 
 model.fit(Xtrain, Ytrain, learn_rate=lr, n_perm=n_iters)
-print("preciisions is " + str(model.precisions(Xtest, Ytest)))
+print("precisions is " + str(model.precisions(Xtest, Ytest)))
+
+
+###################################################
+# compare it to SVC in sklearn
+###################################################
+
+
+sk_svc = svm.SVC(kernel=kernel, C=1.0)
+sk_svc.fit(Xtrain, Ytrain)
+print("precisions in sklearn is " + str(sk_svc.score(Xtest, Ytest)))
