@@ -1,7 +1,5 @@
 import numpy as np
 from sklearn.datasets import load_breast_cancer
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
 
 from sklearn import svm
 
@@ -76,11 +74,47 @@ class mySvm:
         P = self.predict(X)
         return np.mean(Y == P)
 
+class my_scaler:
+
+    def __int__(self, X=None):
+        self.data = X
+
+    def fit(self, X):
+        self.mean = np.mean(X, axis=0)
+        self.std = np.std(X, axis=0)
+
+    def transform(self, X):
+        if np.ndim(X) - np.ndim(self.mean) == 1:
+            return (X - self.mean)/self.std
+        else:
+            ValueError("the dimension of train data don't match the transformed data")
+
+
+def split_train_test(X, Y, test_size=0.5, psudo_seed=1):
+    test_n = round(test_size * X.shape[0])
+
+    if X.shape[0] == Y.shape[0]:
+        np.random.seed(psudo_seed)
+        np.random.shuffle(X)
+        np.random.seed(psudo_seed)
+        np.random.shuffle(Y)
+
+        test_X = X[:test_n]
+        test_Y = Y[:test_n]
+        train_X = X[test_n:]
+        train_Y = Y[test_n:]
+
+        return train_X, test_X, train_Y, test_Y
+    else:
+        ValueError("X and Y should have same number of records")
+
+
+
 
 def medical():
   data = load_breast_cancer()
   X, Y = data.data, data.target
-  Xtrain, Xtest, Ytrain, Ytest = train_test_split(X, Y, test_size=0.33)
+  Xtrain, Xtest, Ytrain, Ytest = split_train_test(X, Y, test_size=0.33)
   return Xtrain, Xtest, Ytrain, Ytest, rbf, 1e-3, 200
 
 
@@ -89,12 +123,14 @@ Xtrain, Xtest, Ytrain, Ytest, kernel, lr, n_iters = medical()
 Ytrain[Ytrain == 0] = -1
 Ytest[Ytest == 0] = -1
 
-  # scale the data
-scaler = StandardScaler()
-Xtrain = scaler.fit_transform(Xtrain)
+scaler = my_scaler()
+scaler.fit(Xtrain)
+
+Xtrain = scaler.transform(Xtrain)
 Xtest = scaler.transform(Xtest)
 
-  # now we'll use our custom implementation
+
+ # now we'll use our custom implementation
 model = mySvm(kernel=kernel, C=1.0)
 
 model.fit(Xtrain, Ytrain, learn_rate=lr, n_perm=n_iters)
