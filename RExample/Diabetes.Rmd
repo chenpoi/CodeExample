@@ -1,0 +1,385 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+Part 1, Initialization
+```{r}
+library(Seurat)
+library(ggplot2)
+library(cowplot)
+library(tidyverse)
+library(limma)
+library(stringr)
+library(fgsea)
+library(xlsx)
+
+getwd()
+options(warn=-1)
+####################################################################
+# director path
+path <- "/Users/mengqichen/maybe_useful/COOP/MGH/Mike/"
+####################################################################
+
+# my_feature_plot is a wrapper version of Seuurat::FeaturePlot(), to make the colors more distinguishing
+my_feature_plot <- function(object, ...) {
+  return(FeaturePlot(object = object, cols=c("white", "red"), ...) + theme(
+    plot.background = element_rect(fill = "black"), 
+    axis.line = element_line(colour = "white", size = 1, linetype = "solid"),
+    axis.text = element_text(colour = "white"),
+    text = element_text(colour = "white"),
+    title = element_text(colour = "white"),
+    axis.ticks = element_line(colour = "white")
+      ))
+}
+
+# ensemble mapping table consist of ensembl_gene_id, external_gene_name, entrezgene.
+get_ensemble_info <- function(ensemble.names, 
+                              attri=c('ensembl_gene_id', 'chromosome_name', 'gene_biotype', 
+                                      'external_gene_name', 'entrezgene', 'description')) {
+  library(BiocFileCache) 
+  library(biomaRt)
+  if (!exists("ensembl")) {
+    ensembl <<- useMart(biomart='ENSEMBL_MART_ENSEMBL', 
+                        dataset="hsapiens_gene_ensembl", 
+                        host="aug2017.archive.ensembl.org") # Ensembl version 90. 
+  }
+  return(getBM(attributes=attri, 
+                          filters="ensembl_gene_id", 
+                          values=ensemble.names, 
+                          mart=ensembl))
+}
+
+# gene set enrichment analysis between diabetes and control
+get_GSEA <- function(seurat_obj, go_db, number_permutation=10000000, target_cluster=NULL) {
+    fgsea_res <- list()
+    print(str(number_permutation))
+    if (is.null(target_cluster)) {
+      for (i in levels(seurat_obj@active.ident)) {
+      control_exp <- rowMeans(as.matrix(seurat_obj@assays$RNA@data[,seurat_obj@meta.data$treatment == "control" & seurat_obj@active.ident == i]))
+      diabetes_exp <- rowMeans(as.matrix(seurat_obj@assays$RNA@data[,seurat_obj@meta.data$treatment == "diabetes" & seurat_obj@active.ident == i]))
+      log_fold <- log2(diabetes_exp/control_exp)
+      log_fold <- log_fold[is.finite(log_fold)]
+      log_fold <- sort(log_fold, decreasing = TRUE)
+      fgsea_res[[i]] <- fgsea(pathways = go_db, 
+                      stats = log_fold,
+                      minSize=10,
+                      maxSize=500,
+                      nperm=number_permutation)
+      }
+    } else {
+      control_exp <- rowMeans(as.matrix(seurat_obj@assays$RNA@data[,seurat_obj@meta.data$treatment == "control" & seurat_obj@active.ident == target_cluster]))
+      diabetes_exp <- rowMeans(as.matrix(seurat_obj@assays$RNA@data[,seurat_obj@meta.data$treatment == "diabetes" & seurat_obj@active.ident == target_cluster]))
+      log_fold <- log2(diabetes_exp/control_exp)
+      log_fold <- log_fold[is.finite(log_fold)]
+      log_fold <- sort(log_fold, decreasing = TRUE)
+
+      fgsea_res[[target_cluster]] <- fgsea(pathways = go_db, 
+                      stats = log_fold,
+                      minSize=10,
+                      maxSize=500,
+                      nperm=number_permutation)
+    }
+    
+    return(fgsea_res)
+}
+
+# format and store cell marker files
+get_known_cell_type_and_markers <- function(path) {
+  file_path = paste(path, 'ScMarker.csv', sep = "")
+  file_content <- read.csv(file_path, header = TRUE, stringsAsFactors = FALSE)
+  prev = ""
+  cell_marker <- list()
+  for (i in 1:nrow(file_content)) {
+    if (file_content[i, "Marker.of"] == prev) {
+      cell_marker[[prev]] <- c(cell_marker[[prev]], file_content[i, "Gene"])
+    } else {
+      prev <- file_content[i, "Marker.of"]
+      cell_marker[prev] <- file_content[i, "Gene"]
+    }
+  }
+  return(cell_marker)
+}
+
+```
+
+
+Part 2: loading data
+```{r}
+
+sample_names <- list.files(paste(path, "raw_data", sep = ""))
+seurat_obj_list <- list()
+
+for (i in 1:length(sample_names)) {
+  sample_obj.data <- readRDS(file = paste(paste(path, "raw_data", sep = ""), sample_names[i], sep = '/'))
+    
+  biomart_info <- get_ensemble_info(sample_obj.data$umicount$inex$all@Dimnames[[1]])
+  biomart_info <- biomart_info[!duplicated(biomart_info$ensembl_gene_id),]
+  rownames(biomart_info) <- biomart_info$ensembl_gene_id
+  external_gene_id <- biomart_info[sample_obj.data$umicount$inex$all@Dimnames[[1]],'external_gene_name']
+  sample_obj.data$umicount$inex$all@Dimnames[[1]][!is.na(external_gene_id)] <- external_gene_id[!is.na(external_gene_id)]
+  
+  seurat_obj_list[i] <- CreateSeuratObject(counts = sample_obj.data$umicount$inex$all, project = sample_names[i], min.cells = 3, min.features = 500)
+  # add a quality control module here
+}
+
+for (i in 1:length(sample_names)) {
+    seurat_obj_list[[i]] <- NormalizeData(seurat_obj_list[[i]], verbose = FALSE)
+    seurat_obj_list[[i]] <- FindVariableFeatures(seurat_obj_list[[i]], selection.method = "vst", 
+        nfeatures = 2000, verbose = FALSE)
+}
+
+```
+
+Part 3: Preprocessing
+```{r}
+
+# intergrate all samples into one, to remove batch effect
+seurat.anchors <- FindIntegrationAnchors(object.list = seurat_obj_list, dims = 1:20)
+seurat_obj <- IntegrateData(anchorset = seurat.anchors, dims = 1:20)
+
+DefaultAssay(seurat_obj) <- "RNA"
+seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-") 
+plot1 <- FeatureScatter(seurat_obj, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+  ggtitle("nCount_RNA vs. percent.mt")
+plot2 <- FeatureScatter(seurat_obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") +
+  ggtitle("nCount_RNA vs. nFeature_RNA")
+CombinePlots(plots = list(plot1, plot2), ncol=1)
+VlnPlot(seurat_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size = 0) 
+
+seurat_obj <- subset(seurat_obj, subset = nFeature_RNA < 6000 & percent.mt < 18)
+
+rm(sample_obj.data)
+rm(seurat.anchors)
+rm(seurat_obj_list)
+```
+
+
+
+Part 4: clustering over highly variable features
+```{r}
+
+DefaultAssay(seurat_obj) <- "integrated"
+seurat_obj[['treatment']] <- sapply(1:nrow(seurat_obj[['orig.ident']]), function(x) str_match(seurat_obj[['orig.ident']][x,1], "_(.*)\\.s")[2])
+
+# Run the standard workflow for visualization and clustering
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+seurat_obj <- CellCycleScoring(seurat_obj, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+seurat_obj <- ScaleData(seurat_obj, vars.to.regress = c("S.Score", "G2M.Score"), features = rownames(seurat_obj))
+seurat_obj <- RunPCA(seurat_obj, npcs = 30, verbose = FALSE)
+# t-SNE and Clustering
+seurat_obj <- RunUMAP(seurat_obj, reduction = "pca", dims = 1:20)
+seurat_obj <- FindNeighbors(seurat_obj, reduction = "pca", dims = 1:20)
+seurat_obj <- FindClusters(seurat_obj, resolution = 0.5)
+
+# Visualization
+p1 <- DimPlot(seurat_obj, reduction = "umap", group.by = "treatment")
+p2 <- DimPlot(seurat_obj, reduction = "umap", label = TRUE)
+plot_grid(p1, p2)
+
+DimPlot(seurat_obj, reduction = "umap", split.by = "treatment")
+```
+
+
+Part 5: loading cell markers to identify clusters
+
+```{r}
+DefaultAssay(seurat_obj) <- "RNA"
+
+biomart_info <- getBM(attributes=c('ensembl_gene_id', 'chromosome_name', 'gene_biotype', 
+                                      'external_gene_name', 'entrezgene', 'description'), 
+                          filters="external_gene_name", 
+                          values=rownames(seurat_obj@assays$RNA@counts), 
+                          mart=ensembl)
+initial_sc_marker <- get_known_cell_type_and_markers(path)
+cell_marker <- list(PT = c("CUBN", "LRP2", "SLC13A3", "SLC34A1", "GPX3", "DCXR"), 
+                             LOH_DL = c("IRX3", "FOXC1"), 
+                             LOH_AL = c("UMOD", "SLC12A1"), 
+                             CD = c("GATA3", "AQP3", "AQP2"), 
+                             Mono1 = c("C1QC", "C1QB", "C1QA"), 
+                             Mono2 = c("C1QC", "C1QB", "C1QA", "PLAUR", "CD74"), 
+                             B_Cells = c("CD74", "CLNK", "IRF8"), 
+                             T_cells = c("TRBC2", "CD96", "TRAC"), 
+                             Plasma1 = c("IGHG4", "IGHG1", "IGHG3", "IGHG2", "IGHGP"), 
+                             Plasma2 = c("IGHG4", "IGHG1", "IGHG3", "IGHG2"), 
+                             Pericyte = c("PDGFRB", "SLIT3", "NOTCH3"), 
+                             Fibroblast = c("TNC", "C7", "COL1A1", "COL1A2", "DCN"), 
+                             Myofibroblast = c("COL1A1", "COL1A2", "DCN"), 
+                             Mast_cells = c("CPA3", "TPSAB1", "TPSB2"), 
+                             EC = c("PECAM1", "ENG", "EMCN"), 
+                             Cycling = c("CENPF", "TOP2A", "MKI67")
+                             )
+cell_marker[["PT"]] <- c(cell_marker[["PT"]], initial_sc_marker$`Proximal tubule`)
+cell_marker["Proximal_convoluted_tubule"] <- initial_sc_marker$`Proximal convoluted tubule`
+cell_marker["Proximal_straight_tubule"] <- initial_sc_marker$`Proximal straight tubule`
+cell_marker[["Glomerular_parietal_epithelial_cells"]] <- initial_sc_marker$`Glomerular parietal epithelial cells`
+cell_marker[["Mono1"]] <- c(cell_marker[["Mono1"]], initial_sc_marker$Monocytes)
+cell_marker[["Mono2"]] <- c(cell_marker[["Mono2"]], initial_sc_marker$Monocytes)
+cell_marker[["NK_cells"]] <- initial_sc_marker$`NK cells`
+cell_marker[["B_Cells"]] <- c(cell_marker[["B_Cells"]], initial_sc_marker$`B cells`)
+cell_marker[["T_Cells"]] <- c(cell_marker[["T_Cells"]], initial_sc_marker$`T cells`)
+cell_marker[["Distal_tubule"]] <- initial_sc_marker$`Distal tubule`
+cell_marker[["CD"]] <- c(cell_marker[["CD"]], initial_sc_marker$`Collecting duct`)
+cell_marker[["Collecting_duct_principal_cells"]] <- c(cell_marker[["CD"]], initial_sc_marker$`Collecting duct principal cells`)
+cell_marker[["Collecting_duct_intercalated_cell"]] <- c(cell_marker[["CD"]], initial_sc_marker$`Collecting duct intercalated cell`)
+cell_marker[["Distal_tubule_Collecting_duct"]] <- c(cell_marker[["CD"]], initial_sc_marker$`Distal tubule, Collecting duct`)
+cell_marker[["Podocyte"]] <- initial_sc_marker$Podocyte
+
+marker_plot <- list()
+for (i in 1:length(cell_marker)) {
+  png(paste("/Users/mengqichen/maybe_useful/COOP/MGH/Mike/", i, ".png", sep = ""))
+  FeaturePlot(seurat_obj, features = cell_marker[[i]], min.cutoff = "q9", reduction = "umap")
+  dev.off()
+}
+
+seurat_obj <- RenameIdents(seurat_obj, `1` = "PT",  `2` = "PT", `3` = "CD", `4` = "LOH_AL", 
+                           `5` = "Collecting_duct_intercalated_cell", `6` = "LOH_AL", `9` = "CD",
+                           `10` = "EC",`12` = "Podocyte", `13` = "Collecting_duct_intercalated_cell",  
+                           `14` = "LOH_AL", `15` = "T_cells", `16` = "EC", 
+                           `17` = "Pericyte/Fibroblast", `18` = "Pericyte/Fibroblast", 
+                           `19` = "Collecting_duct_intercalated_cell" , `21` = "PT")
+
+rm(initial_sc_marker)
+rm(marker_plot)
+
+# the below is based on old marker files
+#seurat_obj <- RenameIdents(seurat_obj, `0` = "PCT", `1` = "PCT", `2` = "CD-PC", 
+#    `3` = "DCT", `4` = "LOH", `5` = "CD-ICA", `6` = "LOH", `7` = "DCT/CT", 
+#    `8` = "IDK1", `9` = "DCT", `10` = "ENDO", `11` = "DCT/CT", `12` = "PEC", 
+#    `13` = "PODO", `14` = "CD-ICB", `15` = "IDK2", `16` = "ENDO", 
+#    `17` = "LEUK", `18` = "MES", `19` = "MES", `20` = "CD-ICA", `21` = "IDK3")
+
+all_cell_tpye <- levels(seurat_obj@active.ident)
+
+p1 <- DimPlot(seurat_obj, group.by = "seurat_clusters", label = TRUE) + NoLegend()
+p2 <- DimPlot(seurat_obj, label = TRUE) + NoLegend()
+CombinePlots(plots = list(p1, p2), ncol = 2)
+```
+
+
+Part 6: find markers for all clusters
+
+```{r}
+seurat_obj <- ScaleData(seurat_obj, verbose = FALSE)
+# take PCT markers as an example
+#cluster1.markers <- FindMarkers(seurat_obj, ident.1 = "PT", min.pct = 0.25)
+#head(cluster1.markers, n = 5)
+
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+seurat_obj.markers <- FindAllMarkers(seurat_obj, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+# top10_markers will store the 10 most significant markers for each cluster
+top10_markers <- list()
+for (i in 1:length(all_cell_tpye)) {
+  top10_markers[i] <- seurat_obj.markers %>% filter(cluster == all_cell_tpye[i]) %>% arrange(p_val_adj) %>% dplyr::select(gene) %>% head(n = 10)
+}
+
+VlnPlot(seurat_obj, features = top10_markers[[1]][1:3])
+
+# you can plot raw counts as well
+VlnPlot(seurat_obj, features = top10_markers[[2]][1:3], slot = "counts", log = TRUE)
+
+FeaturePlot(seurat_obj, features = top10_markers[[3]][1:3])
+
+top10 <- seurat_obj.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC)
+DoHeatmap(seurat_obj, features = top10$gene) + NoLegend()
+
+rm(top10)
+
+# write to file
+marker_table <- data.frame()
+for (i in 1:length(all_cell_tpye)) {
+  marker_table <- rbind(marker_table, seurat_obj.markers %>% filter(cluster == all_cell_tpye[i]) %>% arrange(p_val_adj) %>% head(n = 100))
+}
+write.xlsx(marker_table, paste(path, "markers_for_each_clusters.xlsx", sep = ""))
+```
+
+
+Part 7: Some important genes
+
+```{r}
+#violin plot for certain genes in each cluster
+VlnPlot(seurat_obj, features = c("HAVCR1"), split.by = "treatment", pt.size = 0, combine = FALSE)[[1]]+ ylim(0,2)
+VlnPlot(seurat_obj, features = c("IGHA1"), split.by = "treatment", pt.size = 0, combine = FALSE)[[1]]
+VlnPlot(seurat_obj, features = c("IGHA1"), split.by = "treatment", pt.size = 0, combine = FALSE)[[1]]+ ylim(0,0.00005)
+VlnPlot(seurat_obj, features = c("LCN2"), split.by = "treatment", pt.size = 0, combine = FALSE)[[1]]
+
+my_feature_plot(seurat_obj, features = c("LCN2"))
+my_feature_plot(seurat_obj, features = c("IGHA1"))
+my_feature_plot(seurat_obj, features = c("HAVCR1"))
+
+my_feature_plot(seurat_obj, features = c("nCount_RNA"))
+my_feature_plot(seurat_obj, features = c("nFeature_RNA"))
+my_feature_plot(seurat_obj, features = c("percent.mt"))
+
+```
+
+
+
+part 8: GSEA analysis
+```{r}
+gsea_db <- list()
+
+# default_gsea_db can be any of c("hallmark", "c2", "go", ......)
+default_gsea_db <- "hallmark"
+
+gsea_db[["c2"]] <- fgsea::gmtPathways(paste(path, "gsea/c2.all.v7.0.symbols.gmt", sep = ""))
+gsea_db[["pathway"]] <- fgsea::gmtPathways(paste(path, "gsea/c2.cp.v7.0.symbols.gmt", sep = ""))
+gsea_db[["bp"]] <- fgsea::gmtPathways(paste(path, "gsea/c5.bp.v7.0.symbols.gmt", sep = ""))
+gsea_db[["cc"]] <- fgsea::gmtPathways(paste(path, "gsea/c5.cc.v7.0.symbols.gmt", sep = ""))
+gsea_db[["mf"]] <- fgsea::gmtPathways(paste(path, "gsea/c5.mf.v7.0.symbols.gmt", sep = ""))
+gsea_db[["go"]] <- c(gsea_db[["mf"]], gsea_db[["cc"]], gsea_db[["bp"]])
+gsea_db[["hallmark"]] <- fgsea::gmtPathways(paste(path, "gsea/h.all.v7.0.symbols.gmt", sep = ""))
+
+fgsea_res <- get_GSEA(seurat_obj, gsea_db[[default_gsea_db]])
+
+head(arrange(fgsea_res[[1]], padj)[c(1,3,5,7)], n = 50)
+
+intersting_cluster <- c("8", "PT", "LOH_AL")
+for (i in intersting_cluster) {
+  df_tmp <- head(arrange(fgsea_res[[i]], padj)[c(1,3,5,7, 8)], n = 50)
+  df_tmp$leadingEdge <- sapply(1:length(df_tmp$leadingEdge), function(x) paste(df_tmp$leadingEdge[[x]], collapse = "_"))
+  write.xlsx(df_tmp, paste("gsea_for_", i, ".xlsx", sep = ""))
+}
+
+```
+
+
+part 9: Differential expression analysis
+```{r}
+# fine DE genes between different treatments in cluster with HAVCR1
+# diabetes vs. control
+new_ident <- Idents(seurat_obj)
+new_ident <- factor(new_ident, levels = c(levels(new_ident), "8_with_HAVCR1"))
+new_ident[seurat_obj@assays$RNA@data["HAVCR1",] > 0.5 & seurat_obj@active.ident == 8] <- "8_with_HAVCR1"
+Idents(seurat_obj) <- new_ident
+
+# diabetes and control proportion in cluster 8 with HAVCR1 more than 0.5
+table(seurat_obj@meta.data[seurat_obj@active.ident == "8_with_HAVCR1", "treatment"])
+
+my_DE <- FindMarkers(seurat_obj, ident.1 = "diabetes", ident.2 = "control", group.by = 'treatment', subset.ident = "8_with_HAVCR1", logfc.threshold = 0.1)
+my_DE %>% add_rownames() %>% filter(p_val_adj < 0.05)
+write.xlsx(my_DE %>% add_rownames() %>% filter(p_val_adj < 0.05), paste("DE_in_", intersting_cluster[1], ".xlsx", sep = ""))
+
+# volcano Plot, you can adjust p_adj_cutoff to the level you want
+library(EnhancedVolcano)
+p_adj_cutoff =0.0005
+EnhancedVolcano(my_DE, lab = row.names(my_DE), selectLab = row.names(my_DE[my_DE$p_val_adj < p_adj_cutoff,]), x = "avg_logFC", y = "p_val_adj", pCutoff = p_adj_cutoff)
+
+#fgsea_DE_res <- get_GSEA(seurat_obj, gsea_db[[default_gsea_db]], target_cluster="8_with_HAVCR1")
+#head(arrange(fgsea_DE_res[[1]], padj)[c(1,3,5,7)], n = 50)
+
+```
+
+
+
