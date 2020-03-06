@@ -1,0 +1,202 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+library(cowplot)
+library(tidyverse)
+library(limma)
+library(stringr)
+library(xlsx)
+library(reshape2)
+library(edgeR)
+library("org.Hs.eg.db")
+library(tidyverse)
+library(Matrix)
+
+getwd()
+options(warn=-1)
+####################################################################
+# director path
+path <- "/Users/mengqichen/maybe_useful/COOP/MGH/Mike/"
+####################################################################
+# ensemble mapping table
+get_ensemble_info <- function(ensemble.names, 
+                              attri=c('ensembl_gene_id', 'chromosome_name', 'gene_biotype', 
+                                      'external_gene_name', 'entrezgene', 'description')) {
+  library(BiocFileCache) 
+  library(biomaRt)
+  if (!exists("ensembl")) {
+    ensembl <<- useMart(biomart='ENSEMBL_MART_ENSEMBL', 
+                        dataset="hsapiens_gene_ensembl", 
+                        host="aug2017.archive.ensembl.org") # Ensembl version 90. 
+  }
+  return(getBM(attributes=attri, 
+                          filters="ensembl_gene_id", 
+                          values=ensemble.names, 
+                          mart=ensembl))
+}
+```
+
+```{r}
+################################################################################
+# edgeR pre-processing
+################################################################################
+### Count Analysis
+sample_names <- list.files(paste(path, "raw_data", sep = ""))
+Counts_list <- list()
+for (i in 1:length(sample_names)) {
+  sample_obj.data <- readRDS(file = paste(paste(path, "raw_data", sep = ""), sample_names[i], sep = '/'))
+  Counts_list[i] <- sample_obj.data$umicount$inex$all[!duplicated(rownames(sample_obj.data$umicount$inex$all)),]
+  
+}
+
+row_name_temp <- vector()
+for (i in 1:length(sample_names)) {
+  row_name_temp <- c(row_name_temp, row.names(Counts_list[[i]]))
+}
+row_name_temp <- row_name_temp[!duplicated(row_name_temp)]
+row_name_temp <- sort(row_name_temp)
+
+for (i in 1:length(sample_names)) {
+  print(i)
+  colnames(Counts_list[[i]]) <- paste(colnames(Counts_list[[i]]), i, sep = "_")
+  
+  remove <- which(duplicated(c(rownames(Counts_list[[i]]), row_name_temp))) - length(rownames(Counts_list[[i]]))
+  row_temp <- row_name_temp[-remove]
+  df_temp <- as(matrix(0L, nrow = length(row_temp), ncol = ncol(Counts_list[[i]])), "dgCMatrix")
+  rownames(df_temp) <- row_temp
+  Counts_list[[i]] <- rbind(Counts_list[[i]], df_temp)
+}
+
+for (i in 1:length(sample_names)) {
+  Counts_list[[i]] <- Counts_list[[i]][order(rownames(Counts_list[[i]])), ]
+}
+
+#Counts <- cbind(Counts_list[[1]], Counts_list[[2]], 
+#                Counts_list[[3]], Counts_list[[4]], 
+#                Counts_list[[5]], Counts_list[[6]])
+
+#rm(Counts_list)
+
+row_temp <- rownames(Counts_list[[1]])
+biomart_info <- get_ensemble_info(row_temp)
+biomart_info <- biomart_info[!duplicated(biomart_info$ensembl_gene_id),]
+rownames(biomart_info) <- biomart_info$ensembl_gene_id
+external_gene_id <- biomart_info[row_temp,'external_gene_name']
+
+dge_list <- list()
+for (i in 1:length(sample_names)) {
+  rownames(Counts_list[[i]])[!is.na(external_gene_id)] <- external_gene_id[!is.na(external_gene_id)]
+  Counts_list[[i]] <- Counts_list[[i]][!duplicated(rownames(Counts_list[[i]])),]
+  ################################################################################
+  # The following function "DGEList" require so many memory that my mac fail to do that
+  ################################################################################
+  dge_list[i] <- DGEList(counts=Counts_list[[i]], genes=rownames(Counts_list[[i]]))
+}
+dge_final <- cbind(dge_list[[1]], dge_list[[2]], dge_list[[3]], dge_list[[4]], dge_list[[5]], dge_list[[6]])
+dge_final <- calcNormFactors(dge_final)
+
+```
+
+
+```{r}
+################################################################################
+# edgeR build model
+################################################################################
+
+design_table <- read_csv(paste(path, "cell_design.csv", sep = ""))
+head(design_table, n = 20)
+design_table <- design_table %>% filter(seurat_clusters == 8)
+
+design <- model.matrix(~treatment, design_table)
+design <- design[,colSums(design) != 0]
+
+y_glm <- estimateGLMCommonDisp(dge_final, design, verbose=TRUE)
+y_glm <- estimateGLMTrendedDisp(y_glm, design)
+y_glm <- estimateGLMTagwiseDisp(y_glm, design)
+pdf(paste(path, "treatment_in_clu8_bcv.pdf", sep = ""))
+plotBCV(y_glm)
+dev.off()
+fit <- glmFit(y_glm, design) 
+
+my_contrasts <- makeContrasts(treatmentdiabetes, levels=make.names(colnames(design)))
+```
+
+```{r}
+################################################################################
+# edgeR differential expression analysis
+################################################################################
+
+lrt <- glmLRT(fit, contrast = my_contrasts[,1])
+DE <- topTags(lrt, n = 1000, p.value = 0.05)
+
+txt_table <- paste(path, "treatment_in_clu8_edger.csv", sep = "") # print full "tags" table of DE genes
+txt_list <- paste(path, "treatment_in_clu8_edger.txt", sep = "") # print list of DE genes
+
+write.table(rownames(DE), file=txt_list, quote=FALSE, row.names=FALSE, col.names=FALSE) 
+write.table(DE, file=txt_table, quote=FALSE, sep = ",")
+
+png(paste(path, "treatment_in_clu8_edger.png", sep = ""), width=1000, height=650, res = 150)
+plotMD(lrt)
+abline(h=c(-1, 1), col="blue")
+dev.off()
+
+```
+
+```{r}
+################################################################################
+# gene set overrepresentation analysis
+################################################################################
+
+readGMT <- function(inputFile){
+  con <- file(inputFile, open = "r")
+  dataList <- list()
+  while (length(oneLine <- readLines(con, n = 1, warn = FALSE)) > 0) {
+    myVector <- unlist(strsplit(oneLine, "\t"))
+    dataList <- c(dataList, list(myVector[3:length(myVector)]))
+    names(dataList)[length(dataList)] <- myVector[1]
+  }
+  close(con)
+  return(dataList)
+}
+
+H_File <- paste(path, "gsea/h.all.v7.0.symbols.gmt", sep = "")
+C2_File <- paste(path, "gsea/c2.all.v7.0.symbols.gmt", sep = "")
+Hum_H <- readGMT(H_File)
+Hum_C2 <- readGMT(C2_File)
+
+idx_H <- ids2indices(Hum_H, id=rownames(lrt))
+idx_C2 <- ids2indices(Hum_C2, id=rownames(lrt))
+
+# Find overlapping gene sets
+cam.H <- camera(lrt$fitted.values, idx_H, design, contrast=my_contrasts[,1], inter.gene.cor=0.01)
+cam.C2 <- camera(lrt$fitted.values, idx_C2, design, contrast=my_contrasts[,1], inter.gene.cor=0.01)
+H.list <- paste(path, "treatment_in_clu8_mSigDB_H.csv", sep = "")
+C2.list <- paste(path, "treatment_in_clu8_mSigDB_C2.csv", sep = "")
+write.table(head(cam.H, n=30), file=H.list, quote=FALSE, sep=",")
+write.table(head(cam.C2, n=30), file=C2.list, quote=FALSE, sep=",")
+
+```
+
+```{r}
+################################################################################
+# Visualization: Volcano plot and MA plot
+################################################################################
+p_cutoff <- 0.0005
+DE_res <- lrt$table
+DE_res$significant <- DE_res$PValue < p_cutoff
+
+pdf(paste(path, "treatment_in_clu8_plot.pdf", sep = ""))
+
+library(EnhancedVolcano)
+EnhancedVolcano(DE_res, lab = row.names(DE_res), x = "logFC", y = "PValue", pCutoff = p_adj_cutoff) 
+
+ggplot(DE_res) +
+  geom_point(aes(x=logCPM, y=logFC, col=significant), size = 0.1)
+
+dev.off()
+```
+
