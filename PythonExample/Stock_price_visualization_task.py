@@ -72,7 +72,7 @@ def update_figure(n_clicks, companies, start_date, end_date):
     }
     return fig
 
-@app.callback(Output('result_plot', 'figure'),
+@app.callback(Output('my_explanation', 'children'),
               [Input('result_plot', 'clickData')])
 def update_figure2(selected_data):
     my_json_comment = json.dump(selected_data)
