@@ -17,7 +17,7 @@ import json
 os.environ["IEX_API_KEY"] = ""
 ########################################################################################################
 
-df = pd.read_csv("./NASDAQcompanylist.csv")
+df = pd.read_csv("./data/NASDAQcompanylist.csv")
 option_dict = [{'label': i, 'value': i} for i in df['Name'].unique()]
 
 # Launch the application:
