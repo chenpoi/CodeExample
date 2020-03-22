@@ -7,7 +7,7 @@ from functools import partial
 import sys
 
 ###
-# align_and_process.py is to continue the work started by prefix_align.py. it read temporary files from prefix_align.py,
+# high_volume_MSA.py is to continue the work started by prefix_align.py. it read temporary files from prefix_align.py,
 # which is separated fasta format files for each cluster defined by CD-HIT. Then clustalo command will get called and
 # undergo Multiple Sequence Alignment(MSA). The final output is consensus sequences for each cluster. Multi-thread mode
 # can be activated if a specific number has been taken as command line parameters
